@@ -1,0 +1,344 @@
+﻿<!DOCTYPE html>
+
+<html>
+
+<div id="info">I3A49 HW4</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r70/three.min.js"></script>
+<script src="https://dl.dropboxusercontent.com/u/3587259/Code/Threejs/OrbitControls.js">
+
+
+</script>
+<script src="https://jyunming-chen.github.io/tutsplus/js/KeyboardState.js"></script>
+
+<head>
+<style>
+
+#info {
+  position: absolute;
+  top: 0px;
+  width: 100%;
+  padding: 10px;
+  text-align: center;
+  color: #ffff00
+}
+
+body {
+  overflow: hidden;
+}
+
+</style>
+</head>
+
+<body> 
+<script>
+
+var camera, scene, renderer, controls;
+var agents = [];
+var obstacles = [];
+
+var pos, vel, force;
+var angle = 0;
+
+// steer related
+var target;
+var targetCatch = false;
+
+// the target
+var raycaster;
+var mouse = new THREE.Vector2();
+var pickables = [];
+var targetMesh;
+
+
+//var power;
+var mass=1;
+var clock = new THREE.Clock();
+
+init();
+animate();
+
+function Obstacle( obCen , obRad ){
+  this.pos = new THREE.Vector3();
+  if (obCen) this.pos.copy(obCen);
+  this.radius = obRad; 
+  this.mesh = new THREE.Mesh (new THREE.CircleGeometry (this.radius, 32),new THREE.MeshBasicMaterial( { color: 0xffffff } ));
+  this.mesh.rotation.x = -Math.PI/2;
+  scene.add(this.mesh);
+  this.mesh.position.copy(this.pos);
+}
+
+function Agent(mesh, pos, name) {
+  this.pos = new THREE.Vector3();
+  if (pos) this.pos.copy(pos);
+  this.mesh = mesh.clone();
+  this.name = name;
+  scene.add(this.mesh);
+  this.nbhd = [];  // array for neighborhood
+  this.obNbhd = []; // array for neighborhood of obstacle
+  
+  this.vel = new THREE.Vector3();
+  this.force = new THREE.Vector3();
+  this.target = new THREE.Vector3();
+  this.angle = 0
+  this.maxSpeed = 60;
+  this.maxForce = 60;
+  this.obSForce = new THREE.Vector3(); // obstacle separation force
+  this.sForce = new THREE.Vector3(); // separation force
+  this.cForce = new THREE.Vector3(); // cohesion force
+  this.aForce = new THREE.Vector3(0, 0, 0); // alignment force
+  
+  ////////////////////////////////////////////////////
+  this.emptyNbhd = function() {
+  	this.nbhd = [];
+    this.obNbhd = [];
+  }
+  
+  this.obSeparation = function() {  // obstacle separation
+  	var tmp = new THREE.Vector3(0,0,0);
+    var tmpProj = tmp.clone().projectOnVector(this.vel);
+    
+    for (var i = 0; i < this.obNbhd.length; i++) {
+  		tmp.add(this.obNbhd[i].pos.clone().sub(this.pos));
+      if (tmp.dot(this.vel) > 0) {
+        if (tmpProj.clone().sub(tmp).length() < this.obNbhd[i].radius + 3) {
+          if (tmpProj.length() < 10 * this.vel.length()) {
+            this.obSForce.add (tmpProj.clone().sub(tmp));
+          }
+        }
+      }
+    }
+    
+    if (this.obSForce.length() > this.maxForce)
+      this.obSForce.setLength (this.maxForce);
+    this.obSForce.multiplyScalar(10);
+  }
+  
+  this.separation = function() {
+  	var tem = new THREE.Vector3(0, 0, 0);
+  	for (var i = 0; i < this.nbhd.length; i++) {
+  		tem.add(this.pos.clone().sub(this.nbhd[i].pos).setLength (this.maxSpeed).sub(this.vel));
+    }
+    if (tem.length() > this.maxForce)
+      tem.setLength (this.maxForce);
+    this.sForce.copy(tem).multiplyScalar(2);
+    //console.log(this.sForce);
+  }
+  
+  this.cohesion = function() {
+  	var tem = new THREE.Vector3(0, 0, 0);
+  	// set pos as the average of my nbhd.pos
+    for (var i = 0; i < this.nbhd.length; i++) {
+    	tem.add(this.nbhd[i].pos.clone().sub(this.pos).setLength (this.maxSpeed).sub(this.vel));
+    }
+    if (tem.length() > this.maxForce)
+      tem.setLength (this.maxForce);
+    this.cForce.copy(tem);
+    //console.log(this.cForce);
+  }
+  
+  this.alignment = function() {
+  	// steer
+    // force: (target - pos) ... unitize * maxSpeed - vel
+    // clamped by maxForce
+    this.aForce = target.clone().sub(this.pos).setLength (this.maxSpeed).sub(this.vel);
+    if (this.aForce.length() > this.maxForce)
+      this.aForce.setLength (this.maxForce);
+    this.aForce.multiplyScalar(5);
+     //console.log(this.aForce);
+  }
+  
+  this.setTarget = function(target) {
+    this.target.copy(target);
+  }
+  
+  this.update = function(dt) {
+    // compute force
+    if (this.obSForce.length() != 0) {
+    	this.force = this.cForce.add(this.sForce.add(this.obSForce));
+    }
+    else
+    	this.force = this.aForce.add(this.cForce.add(this.sForce));
+    	
+    // force clamping
+    if (this.force.length() > this.maxForce)
+      this.force.setLength(this.maxForce);
+    this.vel.add(this.force.clone().multiplyScalar(dt));
+
+    // velocity clamping
+    if (this.vel.length() > this.maxSpeed)
+      this.vel.setLength(this.maxSpeed);
+    this.pos.add(this.vel.clone().multiplyScalar(dt));
+
+    if (this.vel.length() > 0.001) {
+      this.angle = Math.atan2(-this.vel.z, this.vel.x);
+    }
+    this.mesh.position.copy(this.pos);
+    this.mesh.rotation.y = this.angle;
+
+    // catch handling
+    if (this.pos.distanceTo(this.target) < 2) {
+      this.vel.set(0, 0, 0);
+      targetCatch = true;
+		}
+  }
+}
+
+function computeNbhd() {
+	var n = agents.length;  // number of agents
+  var R = 10;
+  var obn = obstacles.length;
+  var L;
+  
+	for (var i = 0; i < n-1; i++) {
+  	for (var j = i+1; j < n; j++) {
+    	if (Math.abs(agents[i].pos.distanceTo(agents[j].pos)) < R) {
+      	agents[i].nbhd.push (agents[j]);
+      	agents[j].nbhd.push (agents[i]);
+      } 
+    }
+    console.log (agents[i].nbhd.pos);
+  }
+  for (var i = 0; i < n; i++) {
+  	for (var j = 0; j < obn; j++) {
+    	L = obstacles[j].radius; 
+      //console.log(L);
+    	if (Math.abs(agents[i].pos.distanceTo(obstacles[j].pos)) < R/2 + L) {
+      	agents[i].obNbhd.push (obstacles[j]);
+      } 
+    }
+    //console.log (agents[i].nbhd.pos);
+  }
+  
+}
+
+function createObstacles() {
+	obstacles.push( new Obstacle(new THREE.Vector3(-50,0,-70), 20));
+  obstacles.push( new Obstacle(new THREE.Vector3(10,0,10), 30));
+  obstacles.push( new Obstacle(new THREE.Vector3(45,0,-60), 25));
+  obstacles.push( new Obstacle(new THREE.Vector3(-70,0,30), 20));
+  obstacles.push( new Obstacle(new THREE.Vector3(70,0,90), 10));
+}
+
+function createAgents() {
+	var q = Math.random() * 2 + 6; // Quantity of agents
+  
+  var geometry = new THREE.BoxGeometry(15, 2, 5);
+  var material = new THREE.MeshNormalMaterial();
+  mesh = new THREE.Mesh(geometry, material);
+  
+  for(var i = 0; i < q; i++) {
+  	agents.push (new Agent(mesh, new THREE.Vector3(),'Agent ' + i));
+  }
+}
+
+function start(){
+	var px,pz; // position.x, position.z, negitive
+	for( var i = 0 ; i < agents.length ; i++ ) {
+  	px = 100 - Math.random() * 200;
+  	pz = Math.random() * 30 + 50;
+    agents[i].vel = new THREE.Vector3(0,0,0);
+   	agents[i].pos = new THREE.Vector3(px, 0, pz);
+  }
+}
+
+function init() {
+	
+  
+  scene = new THREE.Scene();
+
+  camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 1000);
+  camera.position.y = 300;
+  camera.position.z = 300;
+  scene.add(camera);
+  
+  createObstacles();
+  createAgents();
+  
+  var gridXZ = new THREE.GridHelper(100, 10);
+  gridXZ.setColors(new THREE.Color(0xff0000), new THREE.Color(0xffffff));
+  scene.add(gridXZ); 
+  
+  renderer = new THREE.WebGLRenderer();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setClearColor(0x888888);
+
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+
+  document.body.appendChild(renderer.domElement);
+  
+  /////////////////////////////////////////////////////////////////////
+	plane = new THREE.Mesh (new THREE.PlaneGeometry(200,200), new THREE.MeshBasicMaterial({visible:false}));
+  scene.add (plane);
+  plane.rotation.x = -Math.PI/2;
+	pickables = [plane];
+
+	target = new THREE.Vector3 (0,0,-50);
+	targetMesh = new THREE.Mesh (new THREE.CylinderGeometry(5,5,2,20), new THREE.MeshNormalMaterial());
+  scene.add (targetMesh);
+
+  raycaster = new THREE.Raycaster();
+  document.addEventListener('mousedown', onDocumentMouseDown, false);
+  
+  start();
+}
+
+function onDocumentMouseDown(event) {
+
+  // PICKING DETAILS: 
+  // convert mouse.xy = [-1,1]^2 (NDC)
+  // unproject (mouse.xy, 1) to a point on the far plane (in world coordinate)
+  // set raycaster (origin, direction)
+  // find intersection objects, (closest first) 
+  // each record as
+  // [ { distance, point, face, faceIndex, object }, ... ]
+
+  event.preventDefault();
+  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+  // find intersections
+  raycaster.setFromCamera(mouse, camera);
+  var intersects = raycaster.intersectObjects(pickables);
+  if (intersects.length > 0) {
+		target.copy(intersects[0].point);
+	}
+}
+
+function animate() {
+	var dt = clock.getDelta();  // delta-time
+  if(targetCatch){
+  	targetCatch = false;
+    start();
+  }	
+  
+  computeNbhd();
+  for (i = 0; i < agents.length; i++) {
+  	if (agents[i].obNbhd.length != 0){
+    	agents[i].obSeparation();
+    }
+    else {
+    	agents[i].obSForce = new THREE.Vector3();
+    }
+    agents[i].separation();
+    agents[i].cohesion();
+    agents[i].alignment();
+  	agents[i].update(dt);
+    agents[i].setTarget(target);
+    agents[i].emptyNbhd();
+  }
+  
+  targetMesh.position.copy (target);
+  
+  controls.update();
+  requestAnimationFrame(animate);
+  render();
+}
+
+function render() {
+  renderer.render(scene, camera);
+}
+
+</script>
+</body>
+
+</html>
